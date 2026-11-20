@@ -33,6 +33,7 @@ class imu_processing_raw(Node, ImuPubPlotFuncs):
         self.timer = self.create_timer(0.01, self.publish_imu)
 
         self.print_count = 0
+        self.read_errors = 0    # Failed I2C reads, skipped instead of stopping the node
 
         self.frame_id = "imu_link"      # Required by ImuPubPlotFuncs.read_imu_data() for message headers
 
@@ -45,7 +46,14 @@ class imu_processing_raw(Node, ImuPubPlotFuncs):
 
     def publish_imu(self):
 
-        imu_msg, mag_msg = self.read_imu_data()  # Read the IMU data
+        try:
+            imu_msg, mag_msg = self.read_imu_data()  # Read the IMU data
+        except OSError as error:
+            # One failed I2C transfer (eg. Errno 121 when the motors start) must not stop the IMU: skip it
+            self.read_errors += 1
+            self.get_logger().warn(f"I2C read failed ({error}), skipped; {self.read_errors} so far",
+                                   throttle_duration_sec=1.0)
+            return
 
         # # We are not calculating orientation yet
         imu_msg.orientation_covariance[0] = -1.0

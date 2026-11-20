@@ -116,7 +116,7 @@ class MagSpinRecorder(Node):
             return np.array(self.samples) if self.samples else np.empty((0, 4))
 
 
-def draw(figure, axes, data, remaining, fit=None):
+def draw(figure, axes, data, remaining, fit=None, stale_since=None):
     """Raw horizontal readings (left) and their heading over time (right); with the fit once done."""
     for ax in axes:
         ax.clear()
@@ -149,6 +149,9 @@ def draw(figure, axes, data, remaining, fit=None):
     if len(data):
         timeline.legend(loc="upper right", fontsize=8)
     status = f"recording: {remaining:.0f} s left, {len(data)} samples" if remaining > 0 else "recording done"
+    elapsed = (time.monotonic() - stale_since) if stale_since is not None else 0.0
+    if remaining > 0 and elapsed > 2.0:
+        status = f"NO DATA for {elapsed:.0f} s: is imu_raw_live running? ({remaining:.0f} s left)"
     figure.suptitle(f"Magnetometer spin calibration ({status})")
 
 
@@ -164,9 +167,13 @@ def main(args=None):
     if interactive:
         plt.ion()
         figure.show()
+    last_count, stale_since = 0, time.monotonic()
     try:
         while (remaining := node.duration - (time.monotonic() - node.start)) > 0:
-            draw(figure, axes, node.snapshot(), remaining)
+            data = node.snapshot()
+            if len(data) != last_count:
+                last_count, stale_since = len(data), time.monotonic()
+            draw(figure, axes, data, remaining, stale_since=stale_since)
             if interactive:
                 figure.canvas.draw_idle()
                 figure.canvas.start_event_loop(0.5)
