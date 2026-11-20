@@ -80,10 +80,33 @@
     # SocketCAN interface of the Scout 2.0 chassis
     can_interface: can0
 
-    # ICM-20948 driver: rover stands still for imu_bias_duration at power-up; flip the sign if a left turn reads negative
+    # ICM-20948 driver (scout_navigation imu_driver, only with imu_source:=driver): rover stands still for
+    # imu_bias_duration at power-up; flip the sign if a left turn reads negative
     imu_rate: 100.0
     imu_bias_duration: 3.0
     imu_yaw_sign: 1.0
+
+    # IMU Kalman heading from imu_processing heading_live (/imu/heading_kalman) as an EKF measurement.
+    # learn: map heading minus IMU heading is averaged from GNSS course over imu_offset_samples straight-driving
+    # samples, checked on the next turn, then the IMU heading corrects the EKF; fixed: use imu_heading_offset
+    # (rad), still checked on a turn; disabled: not used
+    # (not "off": YAML reads that as false)
+    imu_heading_mode: learn
+    imu_heading_offset: 0.0
+    # Standard deviation per 20 Hz update (rad); starting value, tune from the recorded bags
+    imu_heading_noise: 0.1
+    # Headings further than this many standard deviations from the EKF are rejected (disturbed magnetometer)
+    imu_heading_gate: 3.0
+    imu_offset_samples: 20
+    imu_learning_yaw_rate: 0.1
+    imu_heading_timeout: 0.5
+    # Before use, a turn (yaw rate above imu_turn_rate, at least imu_minimum_turn rad) must show the IMU heading
+    # turning with the EKF to within imu_turn_tolerance rad: catches a magnetometer sign or axis mismatch
+    imu_turn_rate: 0.2
+    imu_minimum_turn: 0.5
+    imu_turn_tolerance: 0.26
+    # A learned offset is dropped and relearned after this many rejections in a row (2 s at 20 Hz)
+    imu_rejection_limit: 40
     # The rover waits until the operator presses Start on the dashboard
     start_mode: idle
     # After every turn the rover stops at the next line's start until Start, so data acquisition can be set up

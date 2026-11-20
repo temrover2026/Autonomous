@@ -32,7 +32,9 @@ dashboard buttons ─> navigator
 
 1. The site file gives the survey grid. The navigator builds a mission: survey lines joined by
    spot turns or U-turns.
-2. The pose estimator combines GNSS, odometry and IMU into position and heading.
+2. The pose estimator combines GNSS, odometry and IMU into position and heading. The IMU's own Kalman heading
+   (gyro + magnetometer, from `imu_processing`) corrects the heading once its offset to the map is learned
+   from GNSS course and checked on a turn.
 3. The navigator follows the mission with pure pursuit: it steers towards a point 1.5 m ahead on the path.
 4. LiDAR returns on the path make the rover detour, or stop if there is no room.
 5. After each turn the rover stops at the start of the next survey line and waits for Start.
@@ -58,8 +60,13 @@ on top of the team's `~/ros2_ws`. That workspace provides the LiDAR driver (`sll
 
 ```bash
 cd ~/workspace && source ~/ros2_ws/install/setup.bash && colcon build --symlink-install
-pip install icm20948      # only for the IMU
+pip install icm20948 smbus2      # only for the IMU
+sudo usermod -aG i2c $USER       # read /dev/i2c-1 (the IMU) without sudo; log out and in again
 ```
+
+The IMU needs its calibration files in `~/imu_calibration/` before the first field run: see
+[`imu_processing/README.md`](imu_processing/README.md) (gyro bias with `cal_gyro_record`, magnetometer with
+`cal_mag_record` and `calibrate_mag`). `run.sh field` stops if they are missing.
 
 ## Run the simulation
 
@@ -105,6 +112,12 @@ ROS_WS=~/workspace ./run.sh field site:=concrete_lawn.yaml
 | `site:=name.yaml` | `survey.yaml` | Site file from `config/` |
 | `payload:=survey.yaml` | `payload.yaml` | Rover only, no carts |
 | `imu:=false` | `true` | No IMU. Also set `dead_reckoning: true` in the site file |
+| `imu_source:=driver` | `controls` | Gyro-only `imu_driver` instead of `imu_processing` (no Kalman heading) |
+| `i2c_bus:=N` | `1` | I2C bus of the IMU |
+| `imu_plot:=true` | `false` | Also open the `imu_processing` heading plot window (needs a display on the rover) |
+| `calibration_dir:=<dir>` | `~/imu_calibration` | IMU calibration files |
+| `record:=false` | `true` | Do not record a bag |
+| `bag_dir:=<dir>` | `~/temrover_bags/field_<date>_<time>` | Where the bag goes |
 | `lidar:=false` | `true` | No LiDAR, so no obstacle avoidance |
 | `camera:=false` | `true` | No camera |
 | `gnss:=false` | `true` | Do not start the RTK bridge |
@@ -125,6 +138,31 @@ can use the GNSS serial port.
 
 The map shows the survey lines, the planned turns (dashed), the tracks of the rover and the carts,
 and the obstacles the LiDAR sees. Cart positions come from a model of the linkages, not from sensors.
+The Heading plot shows the last minute of the EKF heading, the IMU Kalman heading and the magnetometer
+heading, all in degrees anticlockwise from east. Its title shows the IMU stage: learning (offset from GNSS
+course, needs a straight run), check on next turn, or in EKF.
+
+### IMU heading and recording
+
+The IMU is the `imu_processing` package (merged from the Controls repository, commit `64314b9`, unchanged):
+`imu_raw_live` reads the ICM-20948 at 100 Hz (on the rover it is on I2C bus 1 at `0x68`; the launch passes
+`i2c_bus:=1`, since the node's own default is bus 2), `imu_cal_live` applies the gyro bias and
+magnetometer calibration, `heading_live` fuses gyro and magnetometer into `/imu/heading_kalman`. The navigator
+takes its yaw rate from `/imu/gyr_cal` and uses `/imu/heading_kalman` as follows (parameters in `survey.yaml`):
+
+1. **Learning.** While the rover drives straight, map heading minus IMU heading is averaged over 20 GNSS
+   course samples. That offset holds the magnetic declination and the IMU mounting, so neither is measured.
+2. **Checking.** On the next turn the IMU heading must turn with the EKF to within 15°. A magnetometer whose
+   sign or axes disagree with the gyro fails here and is never used; the log says so.
+3. **In EKF.** Every control step the IMU heading corrects the EKF heading. Headings more than 3 standard
+   deviations off (a disturbed magnetometer) are rejected; 40 in a row and the offset is relearned.
+
+`imu_heading_mode: fixed` with `imu_heading_offset` skips learning; `disabled` leaves the EKF as before.
+
+`run.sh field` records a bag (`ros2 bag record`) of every IMU stage, the headings, GNSS, odometry, `/cmd_vel`,
+`/estimated_pose` and `/survey_status`. `survey_status` carries the EKF heading and its standard deviation,
+the IMU and magnetometer headings in the map frame, the IMU stage and offset, and the last innovation, so
+the EKF noise settings and the steering gains can be tuned offline: `ros2 bag play ~/temrover_bags/<run>`.
 
 ### New site
 
@@ -155,7 +193,8 @@ Everything is in `scout_navigation/` unless noted.
 | `detour.py` | Path around an obstacle and back to the survey line |
 | `geodesy.py` | Latitude/longitude to local east/north metres |
 | `scout_can_bridge.py` | Rover only. `/cmd_vel` to Scout 2.0 CAN frames, chassis feedback to `/odom`. Stops the rover if commands stop arriving |
-| `imu_driver.py` | Rover only. Reads the ICM-20948 IMU and publishes `imu/data` |
+| `imu_heading.py` | When the IMU Kalman heading may correct the EKF: learns its offset, checks it on a turn |
+| `imu_driver.py` | Rover only, with `imu_source:=driver`. Gyro-only ICM-20948 reader publishing `imu/data` |
 | `ntrip_proxy.py` | Rover only. Sits between the RTK bridge and the correction service so the corrections arrive intact |
 | `survey_marker.py` | Simulation only. Draws the survey lines and their ends in Gazebo |
 
@@ -166,8 +205,8 @@ Everything is in `scout_navigation/` unless noted.
 | `run.sh` | One command per run: `./run.sh sim` or `./run.sh field` |
 | `sim.launch.py` | `gazebo.launch.py` + `dashboard.launch.py` |
 | `gazebo.launch.py` | Gazebo world, rover model, obstacles, ROS bridge, navigator |
-| `field.launch.py` | `hardware.launch.py` + `dashboard.launch.py` + RTK GNSS + LiDAR |
-| `hardware.launch.py` | Navigator, CAN bridge, IMU driver |
+| `field.launch.py` | `hardware.launch.py` + `dashboard.launch.py` + RTK GNSS + LiDAR + bag recording |
+| `hardware.launch.py` | Navigator, CAN bridge, IMU (`imu_processing` nodes) |
 | `dashboard.launch.py` | rosbridge (9090), video server (8080), web page (8000) |
 
 ### Parameters: `config/`
@@ -198,6 +237,7 @@ Parameters are layered: `survey.yaml`, then `rover.yaml` (rover only), then `pay
 | `research_log.md` | What was tried, what was found, and why each design choice was made |
 | `architecture.zh.md`, `research_log.zh.md` | Chinese versions |
 | `../scout_description/` | AgileX's Scout 2.0 model, adapted for Gazebo Fortress |
+| `../imu_processing/` | ICM-20948 reading, calibration and Kalman heading (from the Controls repository); its own README |
 
 ### Tools: `experiments/`
 
@@ -219,7 +259,10 @@ Run from `scout_navigation/` with `PYTHONPATH=.:experiments python3 experiments/
 
 ## Known limits
 
-- In the field the rover weaves 0.3–0.5 m around the survey line. Heading is the cause: the IMU is
-  not fitted yet and wheel odometry slips on grass.
+- In the field the rover weaves 0.3–0.5 m around the survey line. Heading is the cause: wheel odometry
+  slips on grass. The IMU heading is meant to fix this; it has been tested in simulation with synthetic
+  sensors only, not on the rover yet.
+- The magnetometer heading is not tilt-compensated, and the rover's motors and steel disturb it: calibrate
+  the magnetometer with the IMU mounted on the rover.
 - U-turns with the Tx and Rx carts work in simulation only; they are not tested in the field.
 - The rover must start facing along line 1. It cannot drive itself to the start.

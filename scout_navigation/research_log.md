@@ -929,3 +929,41 @@ than its foot on it; the path runs on through lines, detours and U-turns up to t
 so turns begin before the rover reaches them. `cross_track_gain` is gone; `heading_gain` is left
 for spot turns. The dashboard takes the status at 10 Hz instead of 5. Gazebo, the same short site:
 both lines and the turn driven, stops at line 2 to wait.
+
+## 2026-11-20 — Controls IMU merged; IMU Kalman heading in the EKF
+
+Merged the Controls repository's `imu_processing` package (commit `64314b9`) into the repository as
+`imu_processing/`, file for file: same unit conversions (m/s^2, rad/s, T), same
+calibration files and topics. It replaces `imu_driver` in `hardware.launch.py` (`imu_source:=driver` brings
+the old one back). The navigator's yaw rate now comes from `/imu/gyr_cal`, and `/imu/heading_kalman`
+corrects the EKF heading through a new `update_heading` with a 3-sigma gate.
+
+The IMU heading is magnetic and in the IMU's frame, so it cannot go into the EKF as it is. The offset to
+the map is learned from GNSS course on straight driving (circular mean of 20 samples, rejected if spread
+over about 18 deg). Before use it must pass a turn check: on the next turn the IMU heading has to turn with
+the EKF to within 15 deg. That check was added after a test with the magnetometer sign flipped: the gate
+alone let the EKF go 21 deg wrong for about a second on the first turn before rejecting.
+
+Synthetic test (`heading_live` + navigator, fake gyro/magnetometer/GNSS/odometry, rover placed 9 deg off
+line 1, 0.01 rad/s gyro bias left, one 69 deg left turn, magnetometer 60 deg off for 2 s):
+
+| Case | Mean heading error after 10 s | Max | IMU outcome |
+|---|---|---|---|
+| IMU heading used | 0.51 deg | 7.8 deg (disturbance) | offset 68.9 deg (true 68.75), passed turn, disturbance rejected, relearned |
+| IMU heading disabled | 0.44 deg | 0.9 deg | — |
+| Magnetometer sign flipped | 0.40 deg | 0.6 deg | failed turn check, never used |
+
+The synthetic GNSS course is perfect, so the EKF alone already does well here; the case for the IMU
+heading is the field, where course is noisy on grass and absent while stopped or spot turning. A
+magnetometer disturbance still moves the EKF by up to about 8 deg before the gate catches it, because
+`heading_live` drags it in gradually; `imu_heading_noise` sets that trade. To tune: the field launch now
+records a bag with every IMU stage, GNSS, odometry, commands and the EKF status.
+
+First field checks: a left turn must raise both `/imu/heading/gyro` and `/imu/heading/mag` (radians,
+anticlockwise; `print_headings` shows compass bearings, which fall instead), then the log must show the
+offset learned on line 1 and the turn check passed after the first turn.
+
+Bus scan on the rover (2026-11-20): the ICM-20948 answers on I2C bus 1 at `0x68` (WHO_AM_I `0xea`), as the
+Controls README says; `imu_raw_live` defaults to bus 2, where nothing answers (Errno 121). The launch files
+pass `i2c_bus:=1` and leave the node's default alone.
+

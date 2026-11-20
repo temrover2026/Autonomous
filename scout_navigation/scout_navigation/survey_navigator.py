@@ -1,6 +1,7 @@
 """The navigator node: turns GNSS, odometry, IMU and LiDAR into /cmd_vel along the survey lines.
 
-Subscribes: gps/fix, gps/vel, imu/data, odom, scan, emergency_stop, survey_mode.
+Subscribes: gps/fix, gps/vel, imu/data, imu/heading_kalman, imu/heading/mag, odom, scan, emergency_stop,
+survey_mode.
 Publishes: cmd_vel, estimated_pose, survey_status (JSON for the dashboard), survey_path, survey_lines,
 driven_route, obstacle_points, and the map -> base_link transform.
 
@@ -17,11 +18,12 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Imu, LaserScan, NavSatFix, PointCloud2
 from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
-from std_msgs.msg import Bool, Header, String
+from std_msgs.msg import Bool, Float64, Header, String
 from tf2_ros import TransformBroadcaster
 
 from .detour import lateral_offset, nearest_group, plan_detour
 from .geodesy import LocalTangentPlane, wrap_to_pi
+from .imu_heading import ImuHeadingAligner
 from .obstacle_monitor import line_frame, scan_points, to_world
 from .pose_estimator import PoseEstimator
 from .survey_grid import generate_survey_mission, survey_lines
@@ -64,6 +66,16 @@ PARAMETERS = [
     ('turn_radius', 0.0), ('headland', 0.0), ('turn_segment_length', 0.5),
     # Driven route for the dashboard: spacing between stored points (m) and publish period (s)
     ('route_spacing', 0.25), ('route_period', 2.0),
+    # IMU Kalman heading (imu_processing heading_live) as an EKF measurement. mode: disabled, learn (offset to the
+    # map from GNSS course on straight driving) or fixed (imu_heading_offset); map heading = IMU heading + offset
+    ('imu_heading_mode', 'learn'), ('imu_heading_offset', 0.0),
+    # Measurement noise (rad), rejection gate (standard deviations), course samples to learn the offset from,
+    # largest yaw rate (rad/s) a learning sample is taken at, and age (s) after which a heading is ignored
+    ('imu_heading_noise', 0.1), ('imu_heading_gate', 3.0), ('imu_offset_samples', 20),
+    ('imu_learning_yaw_rate', 0.1), ('imu_heading_timeout', 0.5),
+    # Turn check before use: yaw rate that counts as turning (rad/s), smallest turn judged (rad), largest
+    # allowed difference between IMU and EKF turn (rad); rejections in a row before a learned offset is dropped
+    ('imu_turn_rate', 0.2), ('imu_minimum_turn', 0.5), ('imu_turn_tolerance', 0.26), ('imu_rejection_limit', 40),
 ]
 
 # States in which the rover must stand still
@@ -119,6 +131,19 @@ class SurveyNavigator(Node):
         self.yaw_rate = 0.0
         # Roll and pitch from the IMU, used to tell ground returns from obstacles
         self.attitude = np.zeros(2)
+        # Latest IMU Kalman and magnetometer headings (rad, IMU frame) with their arrival times
+        self.imu_heading = None
+        self.imu_heading_at = None
+        self.mag_heading = None
+        # Offset of the IMU heading to the map, and whether the EKF may use it yet
+        self.imu_aligner = ImuHeadingAligner(
+            self.settings['imu_heading_mode'], self.settings['imu_heading_offset'],
+            self.settings['imu_offset_samples'], self.settings['imu_learning_yaw_rate'],
+            self.settings['imu_turn_rate'], self.settings['imu_minimum_turn'],
+            self.settings['imu_turn_tolerance'], self.settings['imu_rejection_limit'])
+        # Last EKF heading innovation from the IMU (rad) and how many were rejected by the gate
+        self.imu_innovation = None
+        self.imu_rejected = 0
         # Obstacle points from the latest scan, in map coordinates
         self.obstacle_points = np.empty((0, 2))
         # Start and end of the survey line being driven, kept while a detour replaces its steps
@@ -153,6 +178,9 @@ class SurveyNavigator(Node):
         # East and north antenna velocity from the receiver's RMC/VTG course and speed
         self.create_subscription(TwistStamped, 'gps/vel', self.on_velocity, 10)
         self.create_subscription(Imu, 'imu/data', self.on_imu, 10)
+        if self.settings['imu_heading_mode'] != 'disabled':
+            self.create_subscription(Float64, 'imu/heading_kalman', self.on_imu_heading, 10)
+            self.create_subscription(Float64, 'imu/heading/mag', self.on_mag_heading, 10)
         # dead_reckoning: no IMU, so the chassis feedback supplies the yaw rate; GNSS is still required
         self.create_subscription(Odometry, 'odom', self.on_chassis_odometry
                                  if self.settings['dead_reckoning'] else self.on_odometry, 10)
@@ -212,7 +240,21 @@ class SurveyNavigator(Node):
             'cross_track': float(cross_track), 'detour': float(self.detour_offset),
             'obstacles': int(len(self.obstacle_points)),
             'blocked_in': float(min(self.blocking_distance(), 99.0)) if self.survey_line is not None else 99.0,
+            # Heading estimation, for the dashboard plot and for tuning the EKF from recorded bags (degrees)
+            'heading_std': float(np.degrees(np.sqrt(self.estimator.heading_variance))),
+            'imu_live': self.imu_heading_fresh(), 'imu_stage': self.imu_aligner.stage,
+            'imu_heading': self.in_map_degrees(self.imu_heading),
+            'mag_heading': self.in_map_degrees(self.mag_heading),
+            'imu_offset': None if self.imu_aligner.offset is None else float(np.degrees(self.imu_aligner.offset)),
+            'imu_offset_progress': self.imu_aligner.progress,
+            'imu_innovation': None if self.imu_innovation is None else float(np.degrees(self.imu_innovation)),
+            'imu_rejected': self.imu_rejected,
         })))
+
+    def in_map_degrees(self, imu_heading):
+        """An IMU-frame heading in degrees anticlockwise from east, or None while it or the offset is unknown."""
+        heading = self.imu_aligner.to_map(imu_heading)
+        return None if heading is None else float(np.degrees(heading))
 
     def current_line(self):
         """Number of the survey line being driven, counting from 1."""
@@ -283,7 +325,53 @@ class SurveyNavigator(Node):
 
     def on_velocity(self, message):
         """GNSS velocity: its direction of travel corrects the estimated heading."""
-        self.estimator.update_course(np.array([message.twist.linear.x, message.twist.linear.y]), self.yaw_rate)
+        course = self.estimator.update_course(np.array([message.twist.linear.x, message.twist.linear.y]),
+                                              self.yaw_rate)
+        if course is not None and self.imu_heading_fresh():
+            self.log_info(self.imu_aligner.add_course(course, self.imu_heading, self.yaw_rate))
+
+    def imu_heading_fresh(self):
+        """True when an IMU Kalman heading arrived within imu_heading_timeout."""
+        return (self.imu_heading_at is not None
+                and (self.get_clock().now() - self.imu_heading_at).nanoseconds * 1e-9
+                < self.settings['imu_heading_timeout'])
+
+    def on_imu_heading(self, message):
+        """IMU Kalman heading (rad, IMU frame) from imu_processing heading_live; applied in control_step."""
+        self.imu_heading = message.data
+        self.imu_heading_at = self.get_clock().now()
+
+    def on_mag_heading(self, message):
+        """Magnetometer-only heading (rad, IMU frame); shown on the dashboard, not used by the EKF."""
+        self.mag_heading = message.data
+
+    def correct_with_imu_heading(self):
+        """Checks the IMU heading on turns, then applies it to the EKF once it has passed."""
+        if not self.has_fix or not self.imu_heading_fresh():
+            return
+        if self.imu_aligner.stage == 'checking':
+            result = self.imu_aligner.track_turn(self.imu_heading, self.estimator.heading, self.yaw_rate)
+            if result is not None:
+                passed, report = result
+                if passed:
+                    self.get_logger().info(report)
+                else:
+                    self.get_logger().error(report)
+        if self.imu_aligner.stage != 'active':
+            return
+        self.imu_innovation, applied = self.estimator.update_heading(
+            self.imu_aligner.to_map(self.imu_heading), self.settings['imu_heading_noise'],
+            self.settings['imu_heading_gate'])
+        if not applied:
+            self.imu_rejected += 1
+            self.get_logger().warn(f'IMU heading rejected: {np.degrees(self.imu_innovation):+.1f} deg from the EKF',
+                                   throttle_duration_sec=2.0)
+        self.log_info(self.imu_aligner.record(applied))
+
+    def log_info(self, line):
+        """Logs a line from the IMU aligner, if it returned one."""
+        if line:
+            self.get_logger().info(line)
 
     def on_odometry(self, message):
         """Chassis speed, used to predict the motion between GNSS fixes."""
@@ -521,6 +609,7 @@ class SurveyNavigator(Node):
             self.started_at = self.get_clock().now()
 
         self.estimator.predict(self.measured_speed, self.yaw_rate, self.settings['control_period'])
+        self.correct_with_imu_heading()
         self.publish_pose()
         self.publish_status()
         if self.has_fix:

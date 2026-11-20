@@ -1,5 +1,6 @@
-"""Whole field experiment in one launch: sensor drivers, navigator, CAN bridge, IMU and dashboard."""
+"""Whole field experiment in one launch: sensor drivers, navigator, CAN bridge, IMU, dashboard and a bag."""
 import os
+import time
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -11,6 +12,13 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 PACKAGE_SHARE = get_package_share_directory('scout_navigation')
+# Recorded for EKF and control design: IMU at every stage, GNSS, odometry, commands, estimate and status
+RECORDED_TOPICS = [
+    '/imu/gyr_raw', '/imu/mag_raw', '/imu/gyr_cal', '/imu/mag_cal',
+    '/imu/heading/gyro', '/imu/heading/mag', '/imu/heading_kalman', '/imu/data',
+    '/gps/fix', '/gps/vel', '/odom', '/cmd_vel', '/estimated_pose', '/survey_status',
+    '/emergency_stop', '/survey_mode',
+]
 LAUNCH = os.path.join(PACKAGE_SHARE, 'launch')
 CONFIG = os.path.join(PACKAGE_SHARE, 'config')
 
@@ -28,6 +36,13 @@ def generate_launch_description():
                               description='Site parameters layered over survey.yaml'),
         DeclareLaunchArgument('payload', default_value=os.path.join(CONFIG, 'payload.yaml')),
         DeclareLaunchArgument('imu', default_value='true'),
+        DeclareLaunchArgument('imu_source', default_value='controls'),
+        DeclareLaunchArgument('imu_plot', default_value='false'),
+        DeclareLaunchArgument('i2c_bus', default_value='1'),
+        DeclareLaunchArgument('calibration_dir', default_value=os.path.expanduser('~/imu_calibration')),
+        DeclareLaunchArgument('record', default_value='true', description='Record a bag of RECORDED_TOPICS'),
+        DeclareLaunchArgument('bag_dir', default_value=os.path.expanduser(
+            os.path.join('~/temrover_bags', time.strftime('field_%Y%m%d_%H%M%S')))),
         DeclareLaunchArgument('gnss', default_value='true'),
         DeclareLaunchArgument('lidar', default_value='true'),
         DeclareLaunchArgument('camera', default_value='true'),
@@ -42,7 +57,11 @@ def generate_launch_description():
 
         include(os.path.join(LAUNCH, 'hardware.launch.py'),
                 {'site': LaunchConfiguration('site'), 'payload': LaunchConfiguration('payload'),
-                 'imu': LaunchConfiguration('imu')}),
+                 'imu': LaunchConfiguration('imu'), 'imu_source': LaunchConfiguration('imu_source'),
+                 'imu_plot': LaunchConfiguration('imu_plot'), 'i2c_bus': LaunchConfiguration('i2c_bus'),
+                 'calibration_dir': LaunchConfiguration('calibration_dir')}),
+        ExecuteProcess(cmd=['ros2', 'bag', 'record', '-o', LaunchConfiguration('bag_dir')] + RECORDED_TOPICS,
+                       name='bag_record', output='screen', condition=IfCondition(LaunchConfiguration('record'))),
         include(os.path.join(LAUNCH, 'dashboard.launch.py'), {'usb_camera': LaunchConfiguration('camera')}),
 
         # The bridge's NTRIP 2.0 request gets chunked replies it writes to the receiver unframed;

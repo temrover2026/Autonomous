@@ -1,6 +1,7 @@
 """Pose estimator: an extended Kalman filter for the rover's position and heading.
 
-Predicts with wheel speed and yaw rate; corrects with GNSS position and GNSS direction of travel.
+Predicts with wheel speed and yaw rate; corrects with GNSS position, GNSS direction of travel and, once its
+offset to the map is known, the IMU's Kalman heading (imu_processing heading_live).
 """
 import numpy as np
 
@@ -67,13 +68,36 @@ class PoseEstimator:
         self._correct(antenna_position - self.state[:2] - self.lever_arm(), observation_matrix,
                       self.gnss_noise)
 
+    @property
+    def heading_variance(self):
+        """Variance of the heading estimate (rad^2)."""
+        return self.covariance[2, 2]
+
     def update_course(self, antenna_velocity, yaw_rate):
-        """GNSS course bounds yaw drift once moving; the antenna's swing about base_link is removed first."""
+        """GNSS course bounds yaw drift once moving; the antenna's swing about base_link is removed first.
+
+        Returns the measured course of base_link (rad), or None when the rover is too slow for one.
+        """
         arm_x, arm_y = self.lever_arm()
         velocity = antenna_velocity - yaw_rate * np.array([-arm_y, arm_x])
         speed = np.linalg.norm(velocity)
         if speed < self.minimum_course_speed:
-            return
-        innovation = np.array([wrap_to_pi(np.arctan2(velocity[1], velocity[0]) - self.state[2])])
+            return None
+        course = np.arctan2(velocity[1], velocity[0])
+        innovation = np.array([wrap_to_pi(course - self.state[2])])
         self._correct(innovation, np.array([[0.0, 0.0, 1.0]]),
                       np.array([[self.course_noise * (self.minimum_course_speed / speed) ** 2]]))
+        return course
+
+    def update_heading(self, heading, noise, gate):
+        """Direct heading measurement (rad, map frame) with standard deviation noise.
+
+        A measurement further than gate standard deviations of the innovation from the estimate is
+        rejected, so a disturbed magnetometer cannot drag the heading away. Returns the innovation (rad)
+        and whether it was applied.
+        """
+        innovation = wrap_to_pi(heading - self.state[2])
+        if innovation ** 2 > gate ** 2 * (self.covariance[2, 2] + noise ** 2):
+            return innovation, False
+        self._correct(np.array([innovation]), np.array([[0.0, 0.0, 1.0]]), np.array([[noise ** 2]]))
+        return innovation, True

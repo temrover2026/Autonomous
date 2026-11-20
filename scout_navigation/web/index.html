@@ -1,6 +1,6 @@
 <!doctype html>
 <!-- Operator dashboard. Talks to ROS through rosbridge (port 9090) and shows the camera from web_video_server (8080).
-     Reads: survey_status, survey_lines, survey_path, driven_route, estimated_pose, scan, obstacle_points, gps/fix.
+     Reads: survey_status (also the EKF, IMU Kalman and magnetometer headings), survey_lines, survey_path, driven_route, estimated_pose, scan, obstacle_points, gps/fix.
      Writes: survey_mode (Start / Pause) and emergency_stop. -->
 <html lang="en">
 <head>
@@ -27,7 +27,7 @@
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 1px 2px rgba(16, 24, 40, .04); min-height: 0; }
   .left { display: grid; grid-template-rows: 1fr 240px; gap: 14px; min-height: 0; }
   #map { position: relative; overflow: hidden; }
-  .plots { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: minmax(0, 1fr); gap: 8px; padding: 10px 12px; overflow: hidden; }
+  .plots { display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: minmax(0, 1fr); gap: 8px; padding: 10px 12px; overflow: hidden; }
   .plots canvas { min-width: 0; min-height: 0; }
   #map .k { position: absolute; top: 12px; left: 16px; }
   canvas { display: block; width: 100%; height: 100%; }
@@ -69,6 +69,7 @@
     <div class="card plots">
       <canvas id="separationPlot"></canvas>
       <canvas id="offsetPlot"></canvas>
+      <canvas id="headingPlot"></canvas>
     </div>
   </div>
   <aside>
@@ -174,7 +175,26 @@ topic('/obstacle_points', 'sensor_msgs/PointCloud2', 200).subscribe(m => {
   }
 });
 topic('/gps/fix', 'sensor_msgs/NavSatFix', 1000).subscribe(m => setPill('fix', m.status.status >= 0));
-topic('/survey_status', 'std_msgs/String', 100).subscribe(m => { state.status = JSON.parse(m.data); renderStatus(); });
+topic('/survey_status', 'std_msgs/String', 100).subscribe(m => { state.status = JSON.parse(m.data); renderStatus(); recordHeadings(); });
+// EKF, IMU Kalman and magnetometer headings (deg anticlockwise from east, map frame) over the last minute
+const HEADING_WINDOW = 60;
+const headings = [];
+function recordHeadings() {
+  const s = state.status, t = Date.now() / 1000;
+  headings.push({ t, ekf: s.heading, imu: s.imu_heading, mag: s.mag_heading });
+  while (headings[0].t < t - HEADING_WINDOW) headings.shift();
+}
+// Adds whole turns so a heading crossing ±180° stays continuous, following the EKF
+function unwrapped(key) {
+  let turns = 0, previous = null;
+  return headings.map(sample => {
+    const v = sample[key];
+    if (v === null || v === undefined) return null;
+    if (previous !== null) turns += Math.round((previous - v) / 360);
+    previous = v;
+    return v + 360 * turns;
+  });
+}
 
 document.getElementById('start').onclick = () => {
   const running = state.status && state.status.mode === 'autonomous';
@@ -327,20 +347,22 @@ function recordTrace(x, y, yaw) {
 }
 
 // Matplotlib-style line plot: tab:blue and tab:orange, light grid, dots on the measured series
-const PLOT_COLOURS = { blue: '#1f77b4', orange: '#ff7f0e' };
+const PLOT_COLOURS = { blue: '#1f77b4', orange: '#ff7f0e', grey: '#7f7f7f' };
 function niceStep(span, count) {
   const raw = span / count, power = 10 ** Math.floor(Math.log10(raw));
   return [1, 2, 2.5, 5, 10].map(f => f * power).find(step => step >= raw);
 }
 
-function drawPlot(plot, title, ylabel, series, yRange) {
+function drawPlot(plot, title, ylabel, series, yRange, axis) {
+  // Default x axis: distance travelled, as the cart model samples it
+  axis = axis || { values: trace.samples.map(sample => sample.distance), label: 'distance travelled (m)', span: PLOT_WINDOW / 6 };
   const pc = plot.getContext('2d'), dpr = window.devicePixelRatio || 1, w = plot.clientWidth, h = plot.clientHeight;
   if (plot.width !== w * dpr || plot.height !== h * dpr) { plot.width = w * dpr; plot.height = h * dpr; }
   pc.setTransform(dpr, 0, 0, dpr, 0, 0);
   pc.fillStyle = '#ffffff'; pc.fillRect(0, 0, w, h);
   const box = { left: 58, right: w - 12, top: 28, bottom: h - 38 };
-  const distances = trace.samples.map(sample => sample.distance);
-  const x0 = distances.length ? distances[0] : 0, x1 = Math.max(x0 + PLOT_WINDOW / 6, distances.length ? distances[distances.length - 1] : 1);
+  const distances = axis.values;
+  const x0 = distances.length ? distances[0] : 0, x1 = Math.max(x0 + axis.span, distances.length ? distances[distances.length - 1] : 1);
   const X = d => box.left + (d - x0) / (x1 - x0) * (box.right - box.left);
   const Y = v => box.bottom - (v - yRange[0]) / (yRange[1] - yRange[0]) * (box.bottom - box.top);
 
@@ -361,13 +383,19 @@ function drawPlot(plot, title, ylabel, series, yRange) {
   pc.font = '600 13px system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
   pc.fillText(title, (box.left + box.right) / 2, 18);
   pc.font = FONT;
-  pc.fillText('distance travelled (m)', (box.left + box.right) / 2, h - 6);
+  pc.fillText(axis.label, (box.left + box.right) / 2, h - 6);
   pc.save(); pc.translate(13, (box.top + box.bottom) / 2); pc.rotate(-Math.PI / 2); pc.fillText(ylabel, 0, 0); pc.restore();
 
   pc.save(); pc.beginPath(); pc.rect(box.left, box.top, box.right - box.left, box.bottom - box.top); pc.clip();
   for (const { values, colour, dots } of series) {
     pc.strokeStyle = colour; pc.fillStyle = colour; pc.lineWidth = 1.8; pc.beginPath();
-    values.forEach((v, i) => i ? pc.lineTo(X(distances[i]), Y(v)) : pc.moveTo(X(distances[i]), Y(v)));
+    // A missing value (null) lifts the pen
+    let pen = false;
+    values.forEach((v, i) => {
+      if (v === null) { pen = false; return; }
+      pen ? pc.lineTo(X(distances[i]), Y(v)) : pc.moveTo(X(distances[i]), Y(v));
+      pen = true;
+    });
     pc.stroke();
     if (dots) for (const [i, v] of values.entries()) { pc.beginPath(); pc.arc(X(distances[i]), Y(v), 2.6, 0, 2 * Math.PI); pc.fill(); }
   }
@@ -406,7 +434,26 @@ function drawNote(plot, title, note) {
   pc.font = FONT; pc.fillStyle = '#6b7280'; pc.fillText(note, w / 2, h / 2);
 }
 
+function drawHeadingPlot() {
+  const plot = document.getElementById('headingPlot'), s = state.status;
+  if (!headings.length) { drawNote(plot, 'Heading', 'No status yet'); return; }
+  const series = [
+    { values: unwrapped('ekf'), colour: PLOT_COLOURS.blue, dots: false, label: 'EKF' },
+    { values: unwrapped('imu'), colour: PLOT_COLOURS.orange, dots: false, label: 'IMU Kalman' },
+    { values: unwrapped('mag'), colour: PLOT_COLOURS.grey, dots: false, label: 'magnetometer' },
+  ];
+  const all = series.flatMap(({ values }) => values).filter(v => v !== null);
+  // IMU stage: learning its offset from GNSS course, checking it on the next turn, or correcting the EKF
+  const title = !s.imu_live || s.imu_stage === 'disabled' ? 'Heading · EKF only'
+    : s.imu_stage === 'learning' ? `Heading · IMU learning ${Math.round(100 * s.imu_offset_progress)}%`
+    : s.imu_stage === 'checking' ? 'Heading · IMU check on next turn'
+    : `Heading · IMU in EKF, ±${s.heading_std.toFixed(1)}°`;
+  const start = headings[0].t;
+  drawPlot(plot, title, 'heading (° from east)', series, paddedRange(all, 20),
+           { values: headings.map(sample => sample.t - start), label: 'time (s)', span: 10 });
+}
 function drawPlots() {
+  drawHeadingPlot();
   if (!towing()) {
     for (const [id, title] of [['separationPlot', 'Tx–Rx separation'], ['offsetPlot', 'Rover–Tx offset']])
       drawNote(document.getElementById(id), title, 'No Tx/Rx in tow');
