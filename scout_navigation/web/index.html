@@ -192,15 +192,14 @@ function recordHeadings() {
   headings.push({ t, ekf: s.heading, imu: s.imu_heading, mag: s.mag_heading });
   while (headings[0].t < t - HEADING_WINDOW) headings.shift();
 }
-// Adds whole turns so a heading crossing ±180° stays continuous, following the EKF
-function unwrapped(key) {
-  let turns = 0, previous = null;
+// One heading series wrapped to 0-360, with the pen lifted where it wraps round
+function wrappedHeadings(key) {
+  let previous = null;
   return headings.map(sample => {
-    const v = sample[key];
-    if (v === null || v === undefined) return null;
-    if (previous !== null) turns += Math.round((previous - v) / 360);
+    const v = sample[key] === null || sample[key] === undefined ? null : ((sample[key] % 360) + 360) % 360;
+    const out = (v !== null && previous !== null && Math.abs(v - previous) > 180) ? null : v;
     previous = v;
-    return v + 360 * turns;
+    return out;
   });
 }
 
@@ -235,7 +234,7 @@ function renderStatus() {
   put('speed', s.speed.toFixed(2));
   const signed = (value, digits) => (value < 0 ? '−' : '+') + Math.abs(value).toFixed(digits);
   put('cross', signed(s.cross_track, 2));
-  put('heading', signed(s.heading, 0));
+  put('heading', (((s.heading % 360) + 360) % 360).toFixed(0));
   // Until the first GNSS fix the EKF only adds up turning since start-up; from the fix it is on the map
   document.getElementById('headingLabel').textContent = s.fix ? 'EKF heading · from east' : 'EKF heading · from start';
   const start = document.getElementById('start');
@@ -457,18 +456,17 @@ function drawHeadingPlot() {
   const plot = document.getElementById('headingPlot'), s = state.status;
   if (!headings.length) { drawNote(plot, 'Heading', 'No status yet'); return; }
   const series = [
-    { values: unwrapped('ekf'), colour: PLOT_COLOURS.blue, dots: false,
+    { values: wrappedHeadings('ekf'), colour: PLOT_COLOURS.blue, dots: false,
       label: s.fix ? 'EKF (from east)' : 'EKF (from starting orientation)' },
-    { values: unwrapped('imu'), colour: PLOT_COLOURS.orange, dots: false, label: 'IMU Kalman' },
+    { values: wrappedHeadings('imu'), colour: PLOT_COLOURS.orange, dots: false, label: 'IMU Kalman' },
   ];
-  const all = series.flatMap(({ values }) => values).filter(v => v !== null);
   // IMU stage: learning its offset from GNSS course, checking it on the next turn, or correcting the EKF
   const title = !s.imu_live || s.imu_stage === 'disabled' ? 'Heading · EKF only'
     : s.imu_stage === 'learning' ? `Heading · IMU learning ${Math.round(100 * s.imu_offset_progress)}%`
     : s.imu_stage === 'checking' ? 'Heading · IMU check on next turn'
     : `Heading · IMU in EKF, ±${s.heading_std.toFixed(1)}°`;
   const start = headings[0].t;
-  drawPlot(plot, title, s.fix ? 'heading (° from east)' : 'heading (° from start)', series, paddedRange(all, 20),
+  drawPlot(plot, title, s.fix ? 'heading (° anticlockwise from east)' : 'heading (° from start)', series, [0, 360],
            { values: headings.map(sample => sample.t - start), label: 'time (s)', span: 10 });
 }
 // IMU headings straight from imu_processing, independent of GNSS: degrees anticlockwise, shown 0-360.
