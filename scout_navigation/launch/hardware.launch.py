@@ -60,7 +60,11 @@ def generate_launch_description():
              output='log', condition=controls_imu),
         Node(package='imu_processing', executable='imu_cal_live', name='imu_cal_live', output='screen',
              parameters=[{'calibration_dir': LaunchConfiguration('calibration_dir')}], condition=controls_imu),
+        # Weighted towards the calibrated gyro: the rover's magnetometer scatters about 4 uT per reading against
+        # a 12 uT horizontal field (replayed on the 20 Nov tests: 2-4x closer to the gyro than the defaults)
         Node(package='imu_processing', executable='heading_live', name='heading_live', output='screen',
+             parameters=[{'angle_noise': 1e-4, 'bias_noise': 1e-6, 'mag_noise': 1.0,
+                          'initial_bias_variance': 1e-6, 'init_samples': 30}],
              condition=controls_imu),
         Node(package='imu_processing', executable='print_headings', name='print_headings', output='screen',
              condition=IfCondition(PythonExpression(

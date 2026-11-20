@@ -75,6 +75,8 @@ class HeadingKalmanFilter:
         bias_noise=0.003,
         mag_noise=0.03,
         max_dt=0.1,
+        initial_bias_variance=1.0,
+        init_samples=1,
     ):
         if angle_noise < 0.0 or bias_noise < 0.0 or mag_noise <= 0.0:
             raise ValueError("Noise values must be non-negative; mag_noise > 0.")
@@ -90,8 +92,13 @@ class HeadingKalmanFilter:
         self.p00 = mag_noise
         self.p01 = 0.0
         self.p10 = 0.0
-        self.p11 = 1.0
+        # Start of the bias uncertainty ((rad/s)^2): 1.0 lets the magnetometer set the bias; a calibrated gyro
+        # (imu_cal_live) warrants about 1e-6, so a noisy magnetometer cannot teach the filter a wrong bias
+        self.p11 = initial_bias_variance
         self.last_time = None
+        # The first heading is the circular mean of this many magnetometer readings, not one noisy reading
+        self.init_samples = max(1, int(init_samples))
+        self.init_headings = []
 
     @staticmethod
     def wrap_angle(angle):
@@ -127,7 +134,11 @@ class HeadingKalmanFilter:
     def update(self, mag_heading, timestamp=None):
         """Correct the predicted yaw with a wrapped magnetic measurement."""
         if self.angle is None:
-            self.angle = self.wrap_angle(mag_heading)
+            self.init_headings.append(mag_heading)
+            if len(self.init_headings) < self.init_samples:
+                return None
+            self.angle = math.atan2(sum(math.sin(h) for h in self.init_headings),
+                                    sum(math.cos(h) for h in self.init_headings))
             self.last_time = timestamp
             return self.angle
 

@@ -21,11 +21,16 @@ class HeadingLive(Node):
         self.declare_parameter("bias_noise", 0.003)
         self.declare_parameter("mag_noise", 0.03)
         self.declare_parameter("max_dt", 0.1)
+        # Defaults keep the original behaviour; the rover launch trusts the calibrated gyro more (see README)
+        self.declare_parameter("initial_bias_variance", 1.0)
+        self.declare_parameter("init_samples", 1)
         self.heading_filter = HeadingKalmanFilter(
             angle_noise=float(self.get_parameter("angle_noise").value),
             bias_noise=float(self.get_parameter("bias_noise").value),
             mag_noise=float(self.get_parameter("mag_noise").value),
             max_dt=float(self.get_parameter("max_dt").value),
+            initial_bias_variance=float(self.get_parameter("initial_bias_variance").value),
+            init_samples=int(self.get_parameter("init_samples").value),
         )
 
         self.gyro_heading_pub = self.create_publisher(
