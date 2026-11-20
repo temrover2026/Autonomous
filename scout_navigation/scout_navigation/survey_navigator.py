@@ -16,7 +16,7 @@ from geometry_msgs.msg import PoseStamped, TransformStamped, Twist, TwistStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from sensor_msgs.msg import Imu, LaserScan, NavSatFix, PointCloud2
+from sensor_msgs.msg import Imu, LaserScan, NavSatFix, NavSatStatus, PointCloud2
 from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
 from std_msgs.msg import Bool, Float64, Header, String
 from tf2_ros import TransformBroadcaster
@@ -302,6 +302,11 @@ class SurveyNavigator(Node):
 
     def on_fix(self, message):
         """GNSS position: the first fix lays out the survey, every fix corrects the estimator."""
+        # Without a fix the driver still publishes, with status -1 and NaN coordinates; taking one as the first
+        # fix laid the survey out at NaN and left the pose NaN for good (seen indoors, 20 Nov)
+        if (message.status.status < NavSatStatus.STATUS_FIX
+                or not (np.isfinite(message.latitude) and np.isfinite(message.longitude))):
+            return
         position = self.tangent_plane.to_local(message.latitude, message.longitude)
         if not self.has_fix:
             self.start_survey(position)

@@ -444,7 +444,6 @@ function drawHeadingPlot() {
   const series = [
     { values: unwrapped('ekf'), colour: PLOT_COLOURS.blue, dots: false, label: 'EKF' },
     { values: unwrapped('imu'), colour: PLOT_COLOURS.orange, dots: false, label: 'IMU Kalman' },
-    { values: unwrapped('mag'), colour: PLOT_COLOURS.grey, dots: false, label: 'magnetometer' },
   ];
   const all = series.flatMap(({ values }) => values).filter(v => v !== null);
   // IMU stage: learning its offset from GNSS course, checking it on the next turn, or correcting the EKF
@@ -488,9 +487,8 @@ function drawImuPlot() {
   const plot = document.getElementById('imuPlot');
   if (!imu.samples.length) { drawNote(plot, 'IMU heading', 'No IMU data: is imu_processing running?'); return; }
   const start = imu.samples[0].t;
-  drawPlot(plot, `IMU heading · Kalman ${wrap360(imu.latest.kalman).toFixed(0)}°`, 'heading (° anticlockwise)', [
-    { values: wrapped('mag'), colour: PLOT_COLOURS.orange, dots: false, label: 'magnetometer' },
-    { values: wrapped('gyro'), colour: PLOT_COLOURS.blue, dots: false, label: 'gyro' },
+  // Only the Kalman heading: the raw gyro and magnetometer headings are in the bag and heading_test_record
+  drawPlot(plot, `IMU Kalman heading · ${wrap360(imu.latest.kalman).toFixed(0)}°`, 'heading (° anticlockwise)', [
     { values: wrapped('kalman'), colour: PLOT_COLOURS.green, dots: false, label: 'Kalman' },
   ], [0, 360], { values: imu.samples.map(sample => sample.t - start), label: 'time (s)', span: 10 });
 }
