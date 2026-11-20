@@ -2,7 +2,7 @@
 <!-- Operator dashboard. Talks to ROS through rosbridge (port 9090) and shows the camera from web_video_server (8080).
      Reads: survey_status (also the EKF, IMU Kalman and magnetometer headings), the IMU topics of imu_processing
      (/imu/heading_kalman, /imu/heading/gyro, /imu/heading/mag, /imu/gyr_cal), survey_lines, survey_path, driven_route, estimated_pose, scan, obstacle_points, gps/fix.
-     Writes: survey_mode (Start / Pause) and emergency_stop. -->
+     Writes: survey_mode (Start / Pause), emergency_stop and reset_heading (Reset orientation). -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -48,6 +48,8 @@
   #start.pause { background: #e8ebef; color: var(--text); }
   #stop { background: var(--red); }
   #stop.resume { background: var(--green); }
+  #resetHeading { grid-column: 1 / -1; background: #e8ebef; color: var(--text); font-weight: 500; padding: 10px; }
+  #resetHeading:disabled { opacity: .45; cursor: not-allowed; }
   @media (max-width: 900px) {
     main { grid-template-columns: 1fr; grid-template-rows: auto auto; }
     .left { grid-template-rows: 60vh 240px; }
@@ -89,6 +91,7 @@
       <div class="buttons">
         <button id="start">Start survey</button>
         <button id="stop">Emergency stop</button>
+        <button id="resetHeading" title="The EKF heading starts again from 0° here; the IMU is not reset">Reset EKF orientation</button>
       </div>
     </div>
   </aside>
@@ -127,6 +130,7 @@ const state = { lines: [], plan: [], route: [], pose: null, scan: [], obstacles:
 const topic = (name, type, throttle) => new ROSLIB.Topic({ ros, name, messageType: type, throttle_rate: throttle || 0 });
 const modeTopic = topic('/survey_mode', 'std_msgs/String');
 const stopTopic = topic('/emergency_stop', 'std_msgs/Bool');
+const resetTopic = topic('/reset_heading', 'std_msgs/Empty');
 const setPill = (id, on) => document.getElementById(id).classList.toggle('on', on);
 ros.on('connection', () => setPill('link', true));
 ros.on('close', () => setPill('link', false));
@@ -204,6 +208,13 @@ document.getElementById('start').onclick = () => {
   const running = state.status && state.status.mode === 'autonomous';
   modeTopic.publish(new ROSLIB.Message({ data: running ? 'idle' : 'autonomous' }));
 };
+// Reset EKF orientation: the navigator sets its EKF heading back to 0 (to line 1 once fixed); the IMU is untouched
+document.getElementById('resetHeading').onclick = () => {
+  if (!confirm('Reset the EKF orientation?\n\nThe EKF heading starts again from 0° here (with a GNSS fix: the '
+               + 'direction of survey line 1). The IMU heading is not reset.')) return;
+  resetTopic.publish(new ROSLIB.Message({}));
+  headings.length = 0;
+};
 document.getElementById('stop').onclick = () => {
   stopTopic.publish(new ROSLIB.Message({ data: !(state.status && state.status.emergency_stop) }));
 };
@@ -230,6 +241,8 @@ function renderStatus() {
   const start = document.getElementById('start');
   start.textContent = s.mode === 'autonomous' ? 'Pause' : s.waiting_at_line_start ? `Start line ${s.line}` : 'Start survey';
   start.classList.toggle('pause', s.mode === 'autonomous');
+  // A heading jump while surveying would make the rover swerve; the navigator refuses it too
+  document.getElementById('resetHeading').disabled = s.mode === 'autonomous';
   const stop = document.getElementById('stop');
   stop.textContent = s.emergency_stop ? 'Resume' : 'Emergency stop';
   stop.classList.toggle('resume', s.emergency_stop);

@@ -1,7 +1,7 @@
 """The navigator node: turns GNSS, odometry, IMU and LiDAR into /cmd_vel along the survey lines.
 
 Subscribes: gps/fix, gps/vel, imu/data, imu/heading_kalman, imu/heading/mag, odom, scan, emergency_stop,
-survey_mode.
+survey_mode, reset_heading.
 Publishes: cmd_vel, estimated_pose, survey_status (JSON for the dashboard), survey_path, survey_lines,
 driven_route, obstacle_points, and the map -> base_link transform.
 
@@ -18,7 +18,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import Imu, LaserScan, NavSatFix, NavSatStatus, PointCloud2
 from sensor_msgs_py.point_cloud2 import create_cloud_xyz32
-from std_msgs.msg import Bool, Float64, Header, String
+from std_msgs.msg import Bool, Empty, Float64, Header, String
 from tf2_ros import TransformBroadcaster
 
 from .detour import lateral_offset, nearest_group, plan_detour
@@ -136,11 +136,7 @@ class SurveyNavigator(Node):
         self.imu_heading_at = None
         self.mag_heading = None
         # Offset of the IMU heading to the map, and whether the EKF may use it yet
-        self.imu_aligner = ImuHeadingAligner(
-            self.settings['imu_heading_mode'], self.settings['imu_heading_offset'],
-            self.settings['imu_offset_samples'], self.settings['imu_learning_yaw_rate'],
-            self.settings['imu_turn_rate'], self.settings['imu_minimum_turn'],
-            self.settings['imu_turn_tolerance'], self.settings['imu_rejection_limit'])
+        self.imu_aligner = self.new_imu_aligner()
         # Last EKF heading innovation from the IMU (rad) and how many were rejected by the gate
         self.imu_innovation = None
         self.imu_rejected = 0
@@ -187,6 +183,8 @@ class SurveyNavigator(Node):
         self.create_subscription(LaserScan, 'scan', self.on_scan, 10)
         self.create_subscription(Bool, 'emergency_stop', self.on_emergency_stop, 10)
         self.create_subscription(String, 'survey_mode', self.on_mode, 10)
+        # Dashboard "Reset orientation": the present orientation becomes the heading reference again
+        self.create_subscription(Empty, 'reset_heading', self.on_reset_heading, 10)
         self.create_timer(self.settings['control_period'], self.control_step)
 
         self.get_logger().info('Waiting for a GNSS fix; the rover must face along line 1')
@@ -427,6 +425,35 @@ class SurveyNavigator(Node):
         self.mode = 'idle'
         self.halt()
         self.get_logger().info('emergency stop cleared: survey reset to line 1, waiting for Start')
+
+    def new_imu_aligner(self):
+        """IMU heading aligner in its first stage (learning, or checking a fixed offset)."""
+        return ImuHeadingAligner(
+            self.settings['imu_heading_mode'], self.settings['imu_heading_offset'],
+            self.settings['imu_offset_samples'], self.settings['imu_learning_yaw_rate'],
+            self.settings['imu_turn_rate'], self.settings['imu_minimum_turn'],
+            self.settings['imu_turn_tolerance'], self.settings['imu_rejection_limit'])
+
+    def on_reset_heading(self, _message):
+        """Heading back to its starting reference: 0 before a GNSS fix, else the direction of line 1.
+
+        For comparing the EKF with the IMU from a common start, and for re-placing the rover along line 1.
+        Refused while surveying: a heading jump would make the rover swerve.
+        """
+        if self.mode == 'autonomous':
+            self.get_logger().warn('Orientation reset refused while surveying: pause first')
+            return
+        heading = self.grid[0] if self.has_fix else 0.0
+        self.estimator.state[2] = heading
+        self.estimator.covariance[2, :] = 0.0
+        self.estimator.covariance[:, 2] = 0.0
+        self.estimator.covariance[2, 2] = self.settings['initial_heading_noise'] ** 2
+        # The learned IMU offset and an unfinished spot turn belong to the old reference
+        self.imu_aligner = self.new_imu_aligner()
+        self.imu_innovation, self.imu_rejected = None, 0
+        self.turn_target = None
+        self.get_logger().info(f'Orientation reset: heading {np.degrees(heading):+.1f} deg'
+                               + (' (direction of line 1)' if self.has_fix else ' (starting orientation)'))
 
     def on_mode(self, message):
         """idle holds the rover, manual hands cmd_vel to the operator, autonomous runs the survey."""
