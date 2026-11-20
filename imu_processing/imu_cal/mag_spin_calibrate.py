@@ -11,6 +11,8 @@ and stores the recording, the fit and the plots in ~/imu_data/<date_time>_mag_sp
 
     ros2 run imu_processing mag_spin_calibrate --ros-args -p duration:=90.0
 
+To fit a recording again without spinning: -p from_csv:=~/imu_data/<date_time>_mag_spin/mag_spin.csv
+
 The plot window shows the readings live; without a display the plot is only saved.
 """
 
@@ -42,54 +44,77 @@ def data_folder(test_name):
     return folder
 
 
-def fit_ellipse_2d(x, y):
-    """Fit the horizontal readings; returns (centre, 2x2 matrix, radius, report).
-
-    The matrix maps the centred ellipse onto a circle of the ellipse's mean radius, so the
-    calibrated field keeps its units (tesla).
-    """
-    data = np.column_stack((x, y))
-    scale = float(np.median(np.linalg.norm(data - data.mean(axis=0), axis=1)))
+def fit_conic_2d(points):
+    """Least-squares ellipse through 2D points; returns (centre, matrix to a circle, radius)."""
+    scale = float(np.median(np.linalg.norm(points - points.mean(axis=0), axis=1)))
     if not np.isfinite(scale) or scale <= 0.0:
         raise ValueError("The magnetometer readings did not change: did the rover turn?")
     # Normalise around the mean so the least-squares fit is well conditioned
-    shift = data.mean(axis=0)
-    u, v = ((data - shift) / scale).T
+    shift = points.mean(axis=0)
+    u, v = ((points - shift) / scale).T
     design = np.column_stack((u * u, u * v, v * v, u, v))
     (a, b, c, d, e), *_ = np.linalg.lstsq(design, np.ones(len(u)), rcond=None)
     quadratic = np.array([[a, b / 2.0], [b / 2.0, c]])
-    eigenvalues, eigenvectors = np.linalg.eigh(quadratic)
-    if np.any(eigenvalues <= 0.0):
+    if np.any(np.linalg.eigvalsh(quadratic) <= 0.0):
         raise ValueError("The readings do not form an ellipse: spin the rover through full turns.")
     centre = -0.5 * np.linalg.solve(quadratic, np.array([d, e]))
-    k = 1.0 + float(centre @ quadratic @ centre)
-    shape = quadratic / k
+    shape = quadratic / (1.0 + float(centre @ quadratic @ centre))
     values, vectors = np.linalg.eigh(shape)
-    to_circle = vectors @ np.diag(np.sqrt(values)) @ vectors.T
-    # Geometric mean of the semi-axes, back in tesla
+    if np.any(values <= 0.0):
+        raise ValueError("The readings do not form an ellipse: spin the rover through full turns.")
+    # Maps the ellipse onto a circle of its geometric mean radius, so the field keeps its units (tesla)
     radius = scale / float(np.sqrt(np.sqrt(np.prod(values))))
-    matrix = radius * to_circle / scale
-    centre_t = centre * scale + shift
+    matrix = radius * (vectors @ np.diag(np.sqrt(values)) @ vectors.T) / scale
+    return centre * scale + shift, matrix, radius
 
-    corrected = (matrix @ (data - centre_t).T).T
-    lengths = np.linalg.norm(corrected, axis=1)
-    spread = float(np.std(lengths) / np.mean(lengths))
+
+def sector_means(points, centre, sectors=36, minimum=3):
+    """Mean reading in each direction sector around centre.
+
+    The ICM-20948 magnetometer on the rover scatters by about 5 uT per reading, half the radius of the
+    circle; averaging every reading taken while the rover faced the same 10 deg sector removes most of it.
+    """
+    angles = np.arctan2(points[:, 1] - centre[1], points[:, 0] - centre[0])
+    index = ((angles + np.pi) / (2 * np.pi) * sectors).astype(int) % sectors
+    return np.array([points[index == k].mean(axis=0) for k in range(sectors) if np.sum(index == k) >= minimum])
+
+
+def fit_ellipse_2d(x, y):
+    """Fit the horizontal readings; returns (centre, 2x2 matrix, radius, report).
+
+    The ellipse is fitted to direction-sector averages (centre refined over three passes, starting from
+    the mean, which is the centre when whole turns are recorded); the shape check uses the averages and
+    the coverage check uses every reading.
+    """
+    data = np.column_stack((x, y))
+    centre = data.mean(axis=0)
+    for _ in range(3):
+        means = sector_means(data, centre)
+        if len(means) < 24:
+            raise ValueError(f"Readings in only {len(means)} of 36 directions: spin through at least one full turn.")
+        centre, matrix, radius = fit_conic_2d(means)
+
+    corrected = (matrix @ (data - centre).T).T
     angles = np.degrees(np.arctan2(corrected[:, 1], corrected[:, 0]))
-    covered = int(np.count_nonzero(np.histogram(angles, bins=36, range=(-180, 180))[0]))
-    axes = 1.0 / np.sqrt(values) * scale
+    covered = int(np.count_nonzero(np.histogram(angles, bins=36, range=(-180, 180))[0] >= 3))
+    mean_lengths = np.linalg.norm((matrix @ (means - centre).T).T, axis=1)
+    spread = float(np.std(mean_lengths) / np.mean(mean_lengths))
+    sample_noise = float(np.std(np.linalg.norm(corrected, axis=1) - radius))
+    axes = np.linalg.svd(np.linalg.inv(matrix), compute_uv=False)
     report = {
-        "samples": len(x),
-        "hard_iron_x_uT": centre_t[0] * 1e6, "hard_iron_y_uT": centre_t[1] * 1e6,
+        "samples": len(x), "direction_sectors": len(means),
+        "hard_iron_x_uT": centre[0] * 1e6, "hard_iron_y_uT": centre[1] * 1e6,
         "radius_uT": radius * 1e6,
         "axis_ratio": float(axes.max() / axes.min()),
         "radius_spread": spread,
+        "reading_noise_uT": sample_noise * 1e6,
         "heading_coverage_deg": covered * 10,
     }
     if covered < 33:
         raise ValueError(f"Only {covered * 10} deg of heading covered: spin through at least one full turn.")
     if spread > 0.1:
         raise ValueError(f"Poor fit (radius spread {spread:.2f}): spin slower, on level ground, away from steel.")
-    return centre_t, matrix, radius, report
+    return centre, matrix, radius, report
 
 
 class MagSpinRecorder(Node):
@@ -100,6 +125,9 @@ class MagSpinRecorder(Node):
         self.declare_parameter("countdown", 5.0)
         self.declare_parameter("calibration_dir", os.path.expanduser("~/imu_calibration"))
         self.declare_parameter("mag_topic", "/imu/mag_raw")
+        # A saved mag_spin.csv to fit instead of recording
+        self.declare_parameter("from_csv", "")
+        self.from_csv = os.path.expanduser(self.get_parameter("from_csv").value)
         self.duration = float(self.get_parameter("duration").value)
         self.calibration_dir = self.get_parameter("calibration_dir").value
         self.lock = threading.Lock()
@@ -183,10 +211,14 @@ def main(args=None):
     threading.Thread(target=executor.spin, daemon=True).start()
     folder = data_folder("mag_spin")
     figure, axes = plt.subplots(1, 2, figsize=(13, 6))
-    interactive = matplotlib.get_backend().lower() != "agg"
+    interactive = matplotlib.get_backend().lower() != "agg" and not node.from_csv
     if interactive:
         plt.ion()
         figure.show()
+    if node.from_csv:
+        node.samples = np.loadtxt(node.from_csv, delimiter=",", skiprows=1).tolist()
+        node.duration, node.start = 0.0, time.monotonic()
+        node.get_logger().info(f"Fitting {len(node.samples)} saved readings from {node.from_csv}")
     last_count, stale_since = 0, node.start
     announced = None
     try:
