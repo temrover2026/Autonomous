@@ -6,7 +6,8 @@ Plots live (on the screen the node can reach) and stores heading_test.csv and he
 
     ros2 run imu_processing heading_test_record --ros-args -p duration:=30.0 -p countdown:=5.0
 
-Panels: the gyro, magnetometer and Kalman headings (degrees -180 to 180, anticlockwise positive; the
+Panels: the gyro, magnetometer and Kalman headings (degrees, 0 to 360 or with -p heading_range:=180
+-180 to 180, anticlockwise positive; the
 gyro is shifted to start on the Kalman heading so the three overlap), the calibrated gyro rates, and
 the raw and calibrated magnetometer field. All three headings must move together.
 """
@@ -44,6 +45,9 @@ class HeadingTestRecorder(Node):
         self.declare_parameter("duration", 30.0)
         self.declare_parameter("countdown", 5.0)
         self.declare_parameter("rate", 30.0)
+        # Heading axis of the plot: 360 shows 0 to 360 deg, 180 shows -180 to 180 deg
+        self.declare_parameter("heading_range", 360)
+        self.heading_range = int(self.get_parameter("heading_range").value)
         self.duration = float(self.get_parameter("duration").value)
         self.lock = threading.Lock()
         self.latest = {}
@@ -83,7 +87,7 @@ class HeadingTestRecorder(Node):
             return np.array(self.rows) if self.rows else np.empty((0, len(COLUMNS)))
 
 
-def draw(figure, axes, data, remaining, duration):
+def draw(figure, axes, data, remaining, duration, heading_range=360):
     headings, rates, mag_raw, mag_cal = axes
     for ax in axes:
         ax.clear()
@@ -93,8 +97,9 @@ def draw(figure, axes, data, remaining, duration):
         # The gyro heading counts from wherever heading_live started; start it on the Kalman heading
         unwrapped["gyro"] += unwrapped["kalman"][0] - unwrapped["gyro"][0]
         for name in HEADINGS:
-            wrapped = (unwrapped[name] + 180.0) % 360.0 - 180.0
-            # Lift the pen where a heading crosses +-180, so the line does not jump across the plot
+            low = 0.0 if heading_range == 360 else -180.0
+            wrapped = (unwrapped[name] - low) % 360.0 + low
+            # Lift the pen where a heading wraps round, so the line does not jump across the plot
             wrapped[1:][np.abs(np.diff(wrapped)) > 180.0] = np.nan
             headings.plot(t, wrapped, label=name, lw=1.2)
         for i, axis in enumerate("xyz"):
@@ -104,9 +109,10 @@ def draw(figure, axes, data, remaining, duration):
         for ax in axes:
             ax.legend(loc="upper left", fontsize=8, ncol=3)
     headings.set_ylabel("heading (deg)")
-    headings.set_ylim(-180, 180)
-    headings.set_yticks(range(-180, 181, 45))
-    headings.set_title("Headings -180 to 180 deg (anticlockwise +; gyro aligned to Kalman at the start)")
+    low = 0 if heading_range == 360 else -180
+    headings.set_ylim(low, low + 360)
+    headings.set_yticks(range(low, low + 361, 45))
+    headings.set_title(f"Headings {low} to {low + 360} deg (anticlockwise +; gyro aligned to Kalman at the start)")
     rates.set_ylabel("rate (deg/s)")
     rates.set_title("Gyro (calibrated)")
     mag_raw.set_ylabel("field (uT)")
@@ -149,7 +155,7 @@ def main(args=None):
     announced = None
     try:
         while (remaining := node.duration - (time.monotonic() - node.start)) > 0:
-            draw(figure, axes, node.snapshot(), remaining, node.duration)
+            draw(figure, axes, node.snapshot(), remaining, node.duration, node.heading_range)
             second = math.ceil(remaining - node.duration) if remaining > node.duration else int(remaining)
             if second != announced:
                 announced = second
@@ -167,7 +173,7 @@ def main(args=None):
     executor.shutdown(timeout_sec=1.0)
 
     data = node.snapshot()
-    draw(figure, axes, data, 0, node.duration)
+    draw(figure, axes, data, 0, node.duration, node.heading_range)
     figure.savefig(os.path.join(folder, "heading_test.png"), dpi=110)
     with open(os.path.join(folder, "heading_test.csv"), "w", newline="") as file:
         writer = csv.writer(file)
