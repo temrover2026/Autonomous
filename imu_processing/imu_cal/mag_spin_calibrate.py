@@ -96,27 +96,33 @@ class MagSpinRecorder(Node):
     def __init__(self):
         super().__init__("mag_spin_calibrate")
         self.declare_parameter("duration", 90.0)
+        # Seconds of "get ready" before recording starts
+        self.declare_parameter("countdown", 5.0)
         self.declare_parameter("calibration_dir", os.path.expanduser("~/imu_calibration"))
         self.declare_parameter("mag_topic", "/imu/mag_raw")
         self.duration = float(self.get_parameter("duration").value)
         self.calibration_dir = self.get_parameter("calibration_dir").value
         self.lock = threading.Lock()
         self.samples = []       # (time, x, y, z) in seconds and tesla
-        self.start = time.monotonic()
+        self.start = time.monotonic() + float(self.get_parameter("countdown").value)
         self.create_subscription(MagneticField, self.get_parameter("mag_topic").value, self.on_mag, 50)
-        self.get_logger().info(f"Recording for {self.duration:.0f} s: spin the rover slowly in place 2-3 times")
+        self.get_logger().info(f"Recording for {self.duration:.0f} s after the countdown: "
+                               "spin the rover slowly in place, at least one full turn")
 
     def on_mag(self, msg):
         m = msg.magnetic_field
+        t = time.monotonic() - self.start
+        if t < 0.0:
+            return      # still counting down
         with self.lock:
-            self.samples.append((time.monotonic() - self.start, m.x, m.y, m.z))
+            self.samples.append((t, m.x, m.y, m.z))
 
     def snapshot(self):
         with self.lock:
             return np.array(self.samples) if self.samples else np.empty((0, 4))
 
 
-def draw(figure, axes, data, remaining, fit=None, stale_since=None):
+def draw(figure, axes, data, remaining, fit=None, stale_since=None, duration=None):
     """Raw horizontal readings (left) and their heading over time (right); with the fit once done."""
     for ax in axes:
         ax.clear()
@@ -140,7 +146,8 @@ def draw(figure, axes, data, remaining, fit=None, stale_since=None):
     scatter.set_ylabel("mag y (uT)")
     scatter.set_title("Horizontal field: should be a circle round + after calibration")
     scatter.grid(True)
-    scatter.legend(loc="upper right", fontsize=8)
+    if len(data):
+        scatter.legend(loc="upper right", fontsize=8)
     timeline.set_xlabel("time (s)")
     timeline.set_ylabel("atan2(y, x) (deg)")
     timeline.set_ylim(-180, 180)
@@ -153,6 +160,19 @@ def draw(figure, axes, data, remaining, fit=None, stale_since=None):
     if remaining > 0 and elapsed > 2.0:
         status = f"NO DATA for {elapsed:.0f} s: is imu_raw_live running? ({remaining:.0f} s left)"
     figure.suptitle(f"Magnetometer spin calibration ({status})")
+    # Large countdown in the middle of the window
+    for text in list(figure.texts):
+        if text.get_gid() == "countdown":
+            text.remove()
+    if duration is not None and remaining > duration:
+        banner, colour = f"GET READY\nstart spinning in {remaining - duration:.0f}", "tab:red"
+    elif remaining > 0:
+        banner, colour = f"SPIN SLOWLY\n{remaining:.0f} s", "tab:green"
+    else:
+        banner = None
+    if banner:
+        figure.text(0.5, 0.5, banner, ha="center", va="center", fontsize=40, color=colour, alpha=0.35,
+                    fontweight="bold", gid="countdown")
 
 
 def main(args=None):
@@ -167,13 +187,23 @@ def main(args=None):
     if interactive:
         plt.ion()
         figure.show()
-    last_count, stale_since = 0, time.monotonic()
+    last_count, stale_since = 0, node.start
+    announced = None
     try:
         while (remaining := node.duration - (time.monotonic() - node.start)) > 0:
             data = node.snapshot()
             if len(data) != last_count:
                 last_count, stale_since = len(data), time.monotonic()
-            draw(figure, axes, data, remaining, stale_since=stale_since)
+            draw(figure, axes, data, remaining, stale_since=stale_since if remaining <= node.duration else None,
+                 duration=node.duration)
+            # The same countdown in the terminal, once per second
+            second = int(remaining - node.duration) + 1 if remaining > node.duration else int(remaining)
+            if second != announced:
+                announced = second
+                if remaining > node.duration:
+                    node.get_logger().info(f"GET READY: start spinning in {second} s")
+                elif second % 5 == 0 or second <= 3:
+                    node.get_logger().info(f"Recording: {second} s left, {len(data)} samples")
             if interactive:
                 figure.canvas.draw_idle()
                 figure.canvas.start_event_loop(0.5)
