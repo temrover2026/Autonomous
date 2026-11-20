@@ -6,7 +6,7 @@ Plots live (on the screen the node can reach) and stores heading_test.csv and he
 
     ros2 run imu_processing heading_test_record --ros-args -p duration:=30.0 -p countdown:=5.0
 
-Panels: the gyro, magnetometer and Kalman headings (degrees 0-360, anticlockwise positive; the
+Panels: the gyro, magnetometer and Kalman headings (degrees -180 to 180, anticlockwise positive; the
 gyro is shifted to start on the Kalman heading so the three overlap), the calibrated gyro rates, and
 the raw and calibrated magnetometer field. All three headings must move together.
 """
@@ -93,8 +93,8 @@ def draw(figure, axes, data, remaining, duration):
         # The gyro heading counts from wherever heading_live started; start it on the Kalman heading
         unwrapped["gyro"] += unwrapped["kalman"][0] - unwrapped["gyro"][0]
         for name in HEADINGS:
-            wrapped = unwrapped[name] % 360.0
-            # Lift the pen where a heading crosses 360/0, so the line does not jump across the plot
+            wrapped = (unwrapped[name] + 180.0) % 360.0 - 180.0
+            # Lift the pen where a heading crosses +-180, so the line does not jump across the plot
             wrapped[1:][np.abs(np.diff(wrapped)) > 180.0] = np.nan
             headings.plot(t, wrapped, label=name, lw=1.2)
         for i, axis in enumerate("xyz"):
@@ -104,9 +104,9 @@ def draw(figure, axes, data, remaining, duration):
         for ax in axes:
             ax.legend(loc="upper left", fontsize=8, ncol=3)
     headings.set_ylabel("heading (deg)")
-    headings.set_ylim(0, 360)
-    headings.set_yticks(range(0, 361, 45))
-    headings.set_title("Headings 0-360 deg (anticlockwise +; gyro aligned to Kalman at the start)")
+    headings.set_ylim(-180, 180)
+    headings.set_yticks(range(-180, 181, 45))
+    headings.set_title("Headings -180 to 180 deg (anticlockwise +; gyro aligned to Kalman at the start)")
     rates.set_ylabel("rate (deg/s)")
     rates.set_title("Gyro (calibrated)")
     mag_raw.set_ylabel("field (uT)")
