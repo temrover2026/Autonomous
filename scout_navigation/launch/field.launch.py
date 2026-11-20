@@ -38,7 +38,7 @@ def generate_launch_description():
         DeclareLaunchArgument('imu', default_value='true'),
         DeclareLaunchArgument('imu_source', default_value='controls'),
         DeclareLaunchArgument('imu_plot', default_value='false'),
-        DeclareLaunchArgument('i2c_bus', default_value='1'),
+        DeclareLaunchArgument('i2c_bus', default_value='auto'),
         DeclareLaunchArgument('calibration_dir', default_value=os.path.expanduser('~/imu_calibration')),
         DeclareLaunchArgument('record', default_value='true', description='Record a bag of RECORDED_TOPICS'),
         DeclareLaunchArgument('bag_dir', default_value=os.path.expanduser(
