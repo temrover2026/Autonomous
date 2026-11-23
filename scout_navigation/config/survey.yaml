@@ -35,6 +35,8 @@
     # A run ends within this distance of its end (m); the rover counts as stopped below this speed (m/s)
     arrival_tolerance: 0.05
     halt_speed: 0.05
+    # A standing rover (below halt_speed and this yaw rate, rad/s) keeps its heading: GNSS noise and gyro bias cannot turn it
+    standing_yaw_rate: 0.02
     # Stops rather than driving on when the rover loses the line; it cannot re-acquire yet
     path_deviation_limit: 3.0
 

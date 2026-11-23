@@ -967,3 +967,44 @@ Bus scan on the rover (2026-11-20): the ICM-20948 answers on I2C bus 1 at `0x68`
 Controls README says; `imu_raw_live` defaults to bus 2, where nothing answers (Errno 121). The launch files
 pass `i2c_bus:=1` and leave the node's default alone.
 
+
+## 2026-11-23 — South Lawn: heading at standstill, magnetometer offset, lookahead
+
+Rover alone on the surveyed South Lawn lines from GS0001 (`config/south_lawn_north.yaml`), RTK fixed,
+pure pursuit, LiDAR off. Bags and GPS logs: <https://huggingface.co/datasets/zeyuren2002/Capstone>.
+
+**Heading drifted while the rover stood.** Three minutes idle took it from 0 to 70 deg. Two causes,
+both now held while the rover stands (speed under `halt_speed`, yaw rate under `standing_yaw_rate`):
+gyro bias and GNSS noise on the 0.30 m lever arm read as a turn, so `predict` skips and the position
+update leaves the heading alone; and at launch the GNSS bridge replays buffered velocities of up to
+0.5 m/s with the rover still, which the course update took as travel (heading jumped -1 to -84 deg in
+1.6 s). `update_course` now returns nothing while standing. Test: `test/test_standing_heading.py`.
+
+**Magnetometer heading offsets the lines after the first turn.** With `imu_heading_mode: learn` the
+offset is learned on line 1 and the turn check passes on the first U-turn; from then lines 2 and 3 sat a
+steady 0.2-0.3 m north of the line whichever way they were driven, which is a heading error of about
+10 deg (offset = lookahead x tan(error)) that depends on the rover's direction. The spin calibration
+leaves a -75 uT hard-iron offset against an 11 uT horizontal field: the rover's own field is not fully
+removed. Disabled until the IMU is moved away from the motors and recalibrated.
+
+**Lookahead** (magnetometer off, antenna at the rover centre), cross-track RMS / max, 2-28 m of each line:
+
+| Lookahead | Line 1 | Line 2 |
+|---|---|---|
+| 0.5 m | 0.88 / 1.38 m | 0.91 / 1.64 m |
+| 1.5 m | 0.24 / 0.58 m | 0.04 / 0.10 m |
+| 2.5 m | 0.18 / 0.46 m | 0.04 / 0.12 m |
+| 3.0 m | 0.20 / 0.46 m | 0.07 / 0.24 m |
+
+The weave is heading lag: the EKF follows GNSS course, which trails the real heading, and a short
+lookahead turns that lag into a 6 s oscillation. Line 2, driven after the U-turn has settled the
+heading, holds 4 cm; line 1 keeps about 0.2 m because the starting heading is assumed along the line.
+Next: a short straight alignment run before steering, and `course_noise` up so the gyro carries more
+of the heading.
+
+**Stops overshoot** by 0.6-0.8 m: `max_deceleration` 6.9 m/s^2 is far above the Scout's braking, so
+slowing starts too late.
+
+**Rover notes.** The IMU moved between I2C buses 1 and 2 across reboots; a read left on register bank 2
+makes the bus probe miss it (select bank 0 first). The LattePanda lost power twice. The I2C header runs
+at 1.8 V while the IMU board pulls up to 3.3 V: add a level shifter.

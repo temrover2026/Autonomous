@@ -22,6 +22,8 @@ class PoseEstimator:
 
         self.state = np.zeros(3)
         self.covariance = np.diag([gnss_noise ** 2, gnss_noise ** 2, initial_heading_noise ** 2])
+        # Set by the navigator each cycle: a standing rover keeps its heading
+        self.standing = False
 
     @property
     def position(self):
@@ -44,6 +46,9 @@ class PoseEstimator:
 
     def predict(self, speed, yaw_rate, time_step):
         """Moves the state forward by one time step using speed and yaw rate."""
+        if self.standing:
+            # Gyro bias and process noise would otherwise turn a rover that is not moving
+            return
         heading = self.state[2]
         self.state += time_step * np.array([speed * np.cos(heading), speed * np.sin(heading), yaw_rate])
         self.state[2] = wrap_to_pi(self.state[2])
@@ -53,20 +58,27 @@ class PoseEstimator:
         jacobian[1, 2] = speed * np.cos(heading) * time_step
         self.covariance = jacobian @ self.covariance @ jacobian.T + self.process_noise * time_step
 
-    def _correct(self, innovation, observation_matrix, noise):
-        """Standard Kalman correction of state and covariance for one measurement."""
+    def _correct(self, innovation, observation_matrix, noise, hold_heading=False):
+        """Kalman correction of state and covariance for one measurement; hold_heading leaves the heading as it is."""
         innovation_covariance = observation_matrix @ self.covariance @ observation_matrix.T + noise
         gain = self.covariance @ observation_matrix.T @ np.linalg.inv(innovation_covariance)
+        if hold_heading:
+            gain[2] = 0.0
         self.state = self.state + gain @ innovation
         self.state[2] = wrap_to_pi(self.state[2])
-        self.covariance = (np.eye(3) - gain @ observation_matrix) @ self.covariance
+        # Joseph form: also correct for the gain with the heading row removed
+        residual = np.eye(3) - gain @ observation_matrix
+        self.covariance = residual @ self.covariance @ residual.T + gain @ noise @ gain.T
 
     def update_position(self, antenna_position):
-        """The antenna is what GNSS measures, so its lever arm enters the observation model."""
+        """The antenna is what GNSS measures, so its lever arm enters the observation model.
+
+        While the rover stands, GNSS noise on the lever arm would read as a turn, so the heading is held.
+        """
         arm_x, arm_y = self.lever_arm()
         observation_matrix = np.array([[1.0, 0.0, -arm_y], [0.0, 1.0, arm_x]])
         self._correct(antenna_position - self.state[:2] - self.lever_arm(), observation_matrix,
-                      self.gnss_noise)
+                      self.gnss_noise, hold_heading=self.standing)
 
     @property
     def heading_variance(self):
@@ -76,8 +88,11 @@ class PoseEstimator:
     def update_course(self, antenna_velocity, yaw_rate):
         """GNSS course bounds yaw drift once moving; the antenna's swing about base_link is removed first.
 
-        Returns the measured course of base_link (rad), or None when the rover is too slow for one.
+        Returns the measured course of base_link (rad), or None when the rover is too slow for one or standing:
+        at launch the GNSS bridge replays buffered velocities of up to 0.5 m/s with the rover still (23 Nov).
         """
+        if self.standing:
+            return None
         arm_x, arm_y = self.lever_arm()
         velocity = antenna_velocity - yaw_rate * np.array([-arm_y, arm_x])
         speed = np.linalg.norm(velocity)

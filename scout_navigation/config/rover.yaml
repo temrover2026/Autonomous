@@ -4,3 +4,5 @@
     # Mounting of the real rover's sensors; only hardware.launch.py loads this, so Gazebo keeps its own
     # This RPLIDAR S2L reads its zero bearing aft, so every return sat 180 deg out until measured
     lidar_yaw: 3.141593
+    # GNSS antenna moved to the rover centre on 23 Nov (it sat 0.30 m behind; field fit -0.08 m)
+    gnss_offset: 0.0

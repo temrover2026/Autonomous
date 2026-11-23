@@ -38,6 +38,8 @@ PARAMETERS = [
     ('max_deceleration', 6.9), ('heading_gain', 1.5), ('lookahead_distance', 1.5),
     # When a run counts as finished, when the rover counts as stopped, and when it counts as lost
     ('arrival_tolerance', 0.05), ('halt_speed', 0.05), ('path_deviation_limit', 3.0),
+    # Below halt_speed and this yaw rate (rad/s) the rover is standing and the estimator holds its heading
+    ('standing_yaw_rate', 0.02),
     # Control loop period (s), wait after launch (s), uncertainty of the starting heading (rad)
     ('control_period', 0.05), ('startup_delay', 5.0), ('initial_heading_noise', 0.35),
     # Spot turns: rate limit, damping on the yaw rate, and the tolerances that end the turn
@@ -640,6 +642,8 @@ class SurveyNavigator(Node):
         if self.started_at is None:
             self.started_at = self.get_clock().now()
 
+        self.estimator.standing = (abs(self.measured_speed) < self.settings['halt_speed']
+                                   and abs(self.yaw_rate) < self.settings['standing_yaw_rate'])
         self.estimator.predict(self.measured_speed, self.yaw_rate, self.settings['control_period'])
         self.correct_with_imu_heading()
         self.publish_pose()

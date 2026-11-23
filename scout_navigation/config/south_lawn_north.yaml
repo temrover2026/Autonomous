@@ -1,0 +1,21 @@
+# Site file: South Lawn, the two northern lines (GS0001 -> GS0002, then GS0004 -> GS0003), rover alone.
+/**:
+  ros__parameters:
+    # North-west corner GS0001 of the surveyed grid (resource/south_lawn_geographic.csv)
+    origin_latitude: -37.79846406
+    origin_longitude: 144.96013761
+    # Lines follow MGA grid east, which is 1.250 deg clockwise of true east at this longitude
+    grid_bearing: -0.02182
+    # Two lines; the negative spacing puts line 2 5 m to the right (south) of line 1
+    grid_width: 5.0
+    grid_length: 30.0
+    line_spacing: -5.0
+    anchor_to_origin: true
+    cruise_speed: 0.95
+    # A plain U after a 5 m run past each line end, as with the carts; the run before line 1 lies behind the rover
+    turn_radius: 2.5
+    headland: 5.0
+    # Magnetometer heading off: about 10 deg error after the first turn offset lines 2 and 3 by 0.2-0.3 m (23 Nov)
+    imu_heading_mode: disabled
+    # Best of 0.5, 1.5, 2.5 and 3 m on 23 Nov: line 2 cross-track RMS 0.04 m
+    lookahead_distance: 2.5
